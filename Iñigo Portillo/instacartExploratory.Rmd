@@ -10,7 +10,7 @@ output:
 source("readDataToMemory.R")
 readInstacart()
 
-library(DBI)
+library(DBI) 
 library(ggplot2)
 library(ggthemes)
 
@@ -216,7 +216,37 @@ reordered_popularity <-
 
 reordered_popularity
 ```
+```{r}
+#Plot histogram
+dbGetQuery(sc,"
+SELECT n_products
+, COUNT(order_id) AS n_orders
+FROM
+(SELECT order_id
+,   COUNT(1) AS n_products
+FROM order_products__prior_tbl
+GROUP BY order_id) op
+GROUP BY n_products
+") %>%
+  ggplot(aes(n_products,n_orders))+
+  geom_bar(stat="identity")+
+  theme_minimal()
+```
+```{r}
+#Plot histogram with sparklyr
+order_products__prior %>%
+  group_by(order_id) %>%
+  summarize(n_products=n()) %>%
+  group_by(n_products) %>%
+  summarize(n_orders=n()) %>%
+  filter(n_products<=50) %>%
+  collect %>%
+  ggplot(aes(n_products,n_orders))+
+  geom_col(fill="red")+
+  theme_minimal()
+  
 
+```
 
 ```{r}
 num_popularity_txt <- "
@@ -315,6 +345,54 @@ product_times_ordered_txt %>%
 ## Questions
 
 * For given department, plot the most popular product (with templating department).
+
+```{r}
+library(whisker)
+library(magrittr)
+
+depart_txt <- "
+SELECT op.product_id
+,   n_orders
+,   p.product_name
+FROM(
+    SELECT product_id
+    , COUNT(1) AS n_orders
+    FROM order_products_prior_tbl
+    GROUP BY product_id
+    ORDER BY n_orders DESC
+    LIMIT 10) op
+LEFT JOIN(
+    SELECT product_id
+    , product_name
+    FROM products_tbl
+    WHERE departmen_id={{dep_id}}) p
+ON op.product_id = p.product_id
+"
+
+data <- list(dep_id = 19)
+
+dep <-
+  dbGetQuery(sc, depart_txt)
+
+dep
+
+
+
+
+product_times_ordered_txt %>%
+  whisker.render(data) %>%
+  cat
+
+
+depart_txt %>%
+  whisker.render(data) %>%
+  dbGetQuery(sc, .) %>%
+  ggplot(aes(n_orders, n_users)) + 
+  geom_line() +
+  theme_minimal()
+```
+
+
 * For given day, rank department popularity.
 
 ## More on orders (Window Functions)
@@ -347,5 +425,121 @@ dbGetQuery(sc,
 FROM orders_tbl
 WHERE user_id <= 10 
 ")
+
+##lo que hace este over partition es coger cada user y reordenarlo dependiendo su order number por subgrupos de
+## cada user, eso lo hace el partition
+```
+# Product that is usually orders in numerous baskets
+
+```{r}
+"
+SELECT apn.product_id
+, avg_products_number
+, product_name
+
+FROM (
+    SELECT pn.product_id
+    ,   AVG(products_number) AS avg_products_number
+    FROM (
+        SELECT order_id
+        ,   product_id
+        ,   COUNT(product_id)  OVER(partition by order_id) AS products_number
+        FROM order_products__train_tbl
+    ) pn
+    GROUP BY product_id
+    ORDER BY avg_products_number DESC
+    LIMIT 100) apn
+LEFT JOIN (
+    SELECT product_id
+    ,   product_name
+    FROM products_tbl) p
+ON apn.product_id = p.product_id
+" %>%
+dbGetQuery(sc, .)
 ```
 
+# Could modify the query and add prduct name?
+
+
+
+```{r}
+"
+SELECT apn.product_id
+, avg_products_number
+, product_name
+
+FROM (
+    SELECT pn.product_id
+    ,   AVG(products_number) AS avg_products_number
+    FROM (
+        SELECT order_id
+        ,   product_id
+        ,   COUNT(product_id)  OVER(partition by order_id) AS products_number
+        FROM order_products__train_tbl
+    ) pn
+    GROUP BY product_id
+    ORDER BY avg_products_number DESC
+    LIMIT 100) apn
+LEFT JOIN (
+    SELECT product_id
+    ,   product_name
+    FROM products_tbl) p
+ON apn.product_id = p.product_id
+" %>%
+dbGetQuery(sc, .)
+```
+
+
+
+```{r}
+"
+SELECT apn.product_id
+, avg_products_number
+, product_name
+
+FROM (
+    SELECT pn.product_id
+    ,   AVG(products_number) AS avg_products_number
+    FROM (
+        SELECT order_id
+        ,   product_id
+        ,   COUNT(product_id)  OVER(partition by order_id) AS products_number
+        FROM order_products__train_tbl
+    ) pn
+    GROUP BY product_id
+    ORDER BY avg_products_number ASC
+    LIMIT 100) apn
+LEFT JOIN (
+    SELECT product_id
+    ,   product_name
+    FROM products_tbl) p
+ON apn.product_id = p.product_id
+" %>%
+dbGetQuery(sc, .)
+```
+
+```{r}
+
+##* For 10 first users and all their orders find days since first order.
+orders %>%
+  filter(user_id <= 10) %>%
+  select(user_id, order_number, days_since_prior_order) %>%
+  arrange(user_id, order_number) %>%
+  mutate(days_since_first_order = cumsum(days_since_prior_order)) %>%
+  mutate(days_since_first_order=ifelse(is.null(days_since_prior_order), 0, days_since_first_order))
+```
+```{r}
+"
+SELECT user_id
+, order_number
+, days_since_prior_order
+,SUM(days_since_prior_order) OVER
+      (PARTITION BY user_id ORDER BY order_number ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS
+      days_since_first_order
+FROM orders_tbl
+WHERE user_id <= 10
+ORDER BY user_id
+, order_number
+"%>%
+dbGetQuery(sc, .)
+```
